@@ -1,58 +1,50 @@
 #!/usr/bin/env python3
-import csv
+import configparser
 import os
-import sqlite3
+import csv
 import requests
 import re
 import getpass
 import hashlib
 from requests.auth import HTTPBasicAuth
 
-# ========================
+config = configparser.ConfigParser()
+read_files = config.read('config.ini')
+if not read_files:
+    raise FileNotFoundError("config.ini not found")
+
+section = config['thesis']
+
 # Configurable variables
 # ========================
-CSV_FILE = r"/full/path/to/csvfile.csv"          # path to your CSV file
-DB_FILE = r"/full/path/to/thesis_data.sqlite"  # SQLite database filename
-DOWNLOAD_DIR = r"/download/directory"         # folder to store downloaded PDFs
-OFFSET = 0                      # starting row offset
-LIMIT = 10                      # number of rows to process at a time
-# ========================
+CSV_FILE = os.path.expanduser(section.get('csv_file'))
+OUTPUT_CSV = os.path.expanduser(section.get('output_csv'))
+DOWNLOAD_DIR = os.path.expanduser(section.get('download_dir'))
+OFFSET = section.getint('offset', fallback=0)
+LIMIT = section.getint('limit', fallback=0) # 0 means no limit
 
-# Alfresco credentials (read from env for security)
-USERNAME = "username"
+# Alfresco credentials (prompt for username and password)
+USERNAME = input("Enter Alfresco username: ")
 PASSWORD = getpass.getpass("Enter Alfresco password: ")
 # ========================
 
-
-def normalize_header(header: str) -> str:
-    """Convert column names to lowercase_with_underscores"""
-    header = header.strip().lower()
-    header = re.sub(r"\s+", "_", header)  # replace spaces with underscores
-    return header
-
-
-def init_db(conn, headers):
-    """Create table if it does not exist"""
-    cols = []
-    for h in headers:
-        if h == "dbid":
-            cols.append("dbid TEXT PRIMARY KEY")
-        else:
-            cols.append(f"{h} TEXT")
-    # Add extra MD5_Valid field
-    cols.append("md5_valid INTEGER")
-    columns = ", ".join(cols)
-    conn.execute(f"CREATE TABLE IF NOT EXISTS thesis ({columns});")
-    conn.commit()
+# Degree and language maps (added from user)
+degree_map = {
+    'Master of Nursing': "MN",
+    'Master of Arts': "MA",
+    'Master of Laws': "LLM",
+    'Doctor of Education': "DEd",
+    'Doctor of Music': "DM",
+    'Master of Arts/Master of Library and Information Studies': "MAMLIS",
+    'Doctor of Philosophy': "PhD",
+    'Master of Science': "MSc",
+    'Master of Education': "MEd"
+}
+language_map = {'eng': "english", 'fre': "french"}
 
 
-def save_to_db(conn, headers, row, md5_valid):
-    """Insert a row into the database with MD5_Valid check"""
-    headers_with_md5 = headers + ["md5_valid"]
-    placeholders = ", ".join(["?"] * len(headers_with_md5))
-    sql = f"INSERT OR REPLACE INTO thesis ({', '.join(headers_with_md5)}) VALUES ({placeholders})"
-    values = [row.get(h, "") for h in headers] + [md5_valid]
-    conn.execute(sql, values)
+
+
 
 
 def download_pdf(url, filename):
@@ -83,55 +75,87 @@ def main():
 
     with open(CSV_FILE, newline='', encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
-        # Normalize headers
-        headers = [normalize_header(h) for h in reader.fieldnames]
-
-        # Connect to SQLite
-        conn = sqlite3.connect(DB_FILE)
-        init_db(conn, headers)
-
-        # Get total number of rows minues the header
+        headers = reader.fieldnames
         total = sum(1 for _ in open(CSV_FILE, encoding="utf-8")) - 1
-        csvfile.seek(0)  # reset file pointer
+        csvfile.seek(0)
         reader = csv.DictReader(csvfile)
 
-        for idx, row in enumerate(reader):
-            if idx < OFFSET:
-                continue
-            if idx >= OFFSET + LIMIT:
-                break
+        with open(OUTPUT_CSV, "w", newline='', encoding="utf-8") as outcsv:
+            writer = csv.writer(outcsv)
+            writer.writerow(["filename"] + headers + ["md5_valid"])
 
-            # convert row keys to match db headers
-            normalized_row = {normalize_header(k): v for k, v in row.items()}
+            for idx, row in enumerate(reader):
+                
+                if idx < OFFSET:
+                    continue
+                if LIMIT > 0:
+                    if idx >= OFFSET + LIMIT:
+                        break
 
-            # Download PDF
-            url = normalized_row.get("download_link", "").strip()
-            safe_name = normalized_row.get("dbid") or f"file_{idx}"
-            filename = os.path.join(DOWNLOAD_DIR, f"{safe_name}.pdf")
-            md5_valid = 0
-
-            if url:
-                if not os.path.exists(filename):
-                    success = download_pdf(url, filename)
+                item_index = {h: i for i, h in enumerate(headers)}
+                line = [row.get(h, "") for h in headers]
+                import unidecode
+                names = line[item_index.get("Author","")][:].strip()
+                if ',' not in names:
+                    names = names.split()
+                    names.insert(0, names.pop() + ',')
+                    names = " ".join(names)
+                names = names.replace(',', ', ').replace('  ', ' ')
+                author = names.replace(', ', ' ').replace(' ', '_').replace('.', '')
+                # Date and filename logic
+                submitted_date = line[item_index.get("Submitted Date","")]
+                if submitted_date and '/' in submitted_date:
+                    m, d, y = submitted_date.split('/')
+                    degree_val = line[item_index.get('Degree','')]
+                    filename = f"{author}_{y}{int(m):02d}_{degree_map.get(degree_val,'UNK')}.pdf".replace('__', '_')
+                    filename = unidecode.unidecode(filename)
+                    line[item_index.get("Submitted Date","")] = f"{m}/{d}/{y}"
                 else:
-                    success = True
+                    filename = f"file_{idx}.pdf"
+                # Approved Date
+                approved_date = line[item_index.get("Approved Date","")]
+                if approved_date and '/' in approved_date:
+                    m, d, y = approved_date.split('/')
+                    line[item_index.get("Approved Date","")] = f"{m}/{d}/{y}"
+                # Date of Embargo
+                embargo_date = line[item_index.get("Date of Embargo","")]
+                if embargo_date and '/' in embargo_date:
+                    m, d, y = embargo_date.split('/')
+                    line[item_index.get("Date of Embargo","")] = f"{m}/{d}/{y}"
+                # Field replacements
+                if item_index.get("Abstract", None) is not None:
+                    line[item_index["Abstract"]] = line[item_index["Abstract"]].replace('\\', '\\\\')
+                if item_index.get("Title", None) is not None:
+                    line[item_index["Title"]] = line[item_index["Title"]].replace('\\', '\\\\')
+                if item_index.get("Other Titles", None) is not None:
+                    line[item_index["Other Titles"]] = line[item_index["Other Titles"]].replace('\\', '\\\\')
+                if item_index.get("Keywords", None) is not None:
+                    line[item_index["Keywords"]] = line[item_index["Keywords"]].replace('|#|', '|').replace(', ', '|')
+                if item_index.get("Supervisor Info", None) is not None:
+                    line[item_index["Supervisor Info"]] = line[item_index["Supervisor Info"]].replace('|#|', '|')
 
-                if success and os.path.exists(filename):
-                    expected_md5 = (normalized_row.get("md5") or "").lower()
-                    actual_md5 = calculate_md5(filename).lower()
-                    if expected_md5 and expected_md5 == actual_md5:
-                        md5_valid = 1
-                        print(f"[OK] {filename} MD5 valid")
+                url = line[item_index.get("Download Link","")].strip() if item_index.get("Download Link","") is not None else ""
+                file_path = os.path.join(DOWNLOAD_DIR, filename)
+                md5_valid = 0
+
+                if url:
+                    if not os.path.exists(file_path):
+                        success = download_pdf(url, file_path)
                     else:
-                        print(f"[!] {filename} MD5 mismatch (expected {expected_md5}, got {actual_md5})")
+                        success = True
 
-            # Save to database with md5_valid flag
-            save_to_db(conn, headers, normalized_row, md5_valid)
+                    if success and os.path.exists(file_path):
+                        expected_md5 = (line[item_index.get(" MD5","")] or "").lower()
+                        actual_md5 = calculate_md5(file_path).lower()
+                        if expected_md5 and expected_md5 == actual_md5:
+                            md5_valid = 1
+                            print(f"[OK] {filename} MD5 valid")
+                        else:
+                            print(f"[!] {filename} MD5 mismatch (expected {expected_md5}, got {actual_md5})")
 
-        conn.commit()
-        conn.close()
+                writer.writerow([filename] + line )
         print("✅ Processing complete.")
-
 
 if __name__ == "__main__":
     main()
+
