@@ -8,7 +8,7 @@ description of them here.
 
 ## Scripts
 
-- **none:** We have yet to upload a script
+- **thesis_downloader.py:** Download theses from Alfresco
 
 ## References
 
