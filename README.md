@@ -9,6 +9,8 @@ description of them here.
 ## Scripts
 
 - **thesis_downloader.py:** Download theses from Alfresco
+- **test_script_compare_checksums.py:** Compare the expected checksum from thumbnail file in jupiter to primary file in DSpace
+- **test_script_update_primary_file.py:** Update the primary file information for a DSpace bundle
 
 ## References
 
