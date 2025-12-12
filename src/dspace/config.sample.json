@@ -1,0 +1,9 @@
+{
+  "username": "username@dspace.org",
+  "password": "dSpacePassword",
+  "collection_id": "70636915-1e6c-4192-98dd-ed7e0fb9e586",
+  "base_url": "https://ualberta-dev.scholaris.ca/server/api",
+  "csv_file": "thesis.csv",
+  "pdf_path": "./thesis/"
+  
+}
